@@ -99,6 +99,54 @@ class Node {
         return files; // Return the set of file names
     }
 
+
+
+    // Network Communication Functions
+    // Function to send a data segment to a specified address using a UDP socket
+    static bool send_segment(int send_socket, const std::vector<char>& data, const std::pair<std::string, int>& addr) {
+        // Validate the socket
+        if (send_socket < 0) {
+            log(node_id, "Error: Invalid socket in send_segment.");
+            return false; // Return false if the socket is invalid
+        }
+    
+        // Validate the data size
+        if (data.empty()) {
+            log(node_id, "Error: Empty data vector in send_segment.");
+            return false; // Return false if the data vector is empty
+        }
+    
+        // Get local socket information (optional, used for logging or segment metadata)
+        struct sockaddr_in sock_addr;
+        socklen_t addr_len = sizeof(sock_addr);
+        if (getsockname(send_socket, (struct sockaddr*)&sock_addr, &addr_len) == -1) {
+            perror("getsockname failed"); // Log the error if getsockname fails
+            log(node_id, "Error: Failed to get socket name.");
+            return false; // Return false if socket name retrieval fails
+        }
+    
+        // Create a UDP segment (optional, can be used for additional metadata or logging)
+        UDPSegment segment(ntohs(sock_addr.sin_port), addr.second, data);
+    
+        // Prepare the destination address structure
+        sockaddr_in client_addr;
+        memset(&client_addr, 0, sizeof(client_addr)); // Zero out the structure
+        client_addr.sin_family = AF_INET; // Set the address family to IPv4
+        client_addr.sin_port = htons(addr.second); // Set the destination port
+        client_addr.sin_addr.s_addr = inet_addr(addr.first.c_str()); // Set the destination IP address
+    
+        // Send the data using the sendto function
+        ssize_t sent_len = sendto(send_socket, data.data(), data.size(), 0,
+                                  (struct sockaddr*)&client_addr, sizeof(client_addr));
+        if (sent_len < 0) {
+            perror("sendto failed"); // Log the error if sendto fails
+            log(node_id, "Error: Failed to send data to " + addr.first + ":" + std::to_string(addr.second));
+            return false; // Return false if data transmission fails
+        }
+    
+        return true; // Return true if the data was successfully sent
+    }
+
 };
 
 #endif
