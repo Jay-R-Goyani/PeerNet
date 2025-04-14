@@ -10,6 +10,7 @@
 #include <sstream>
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #include <cstring>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -331,6 +332,8 @@ class Node {
             return;
         }
     
+        auto start_time = std::chrono::high_resolution_clock::now(); // Start timing
+        
         std::string file_path = std::string(Config::Directory::NODE_FILES_DIR) + 
                               "node" + std::to_string(node_id) + "/" + 
                               filename;
@@ -341,6 +344,10 @@ class Node {
                 (errno != ENOENT ? " (" + std::string(strerror(errno)) + ")" : ""));
             return;
         }
+    
+        // Get file size for logging
+        off_t file_size = file_stat.st_size;
+        log(node_id, "Starting to send file: " + filename + " (Size: " + std::to_string(file_size) + " bytes)");
     
         // Split the file into chunks based on the specified range
         std::vector<std::vector<char>> chunk_pieces = split_file_to_chunks(file_path, range);
@@ -361,23 +368,27 @@ class Node {
             return;
         }
     
+        size_t total_bytes_sent = 0;
+        
         // Send each chunk to the destination node
         for (size_t idx = 0; idx < chunk_pieces.size(); ++idx) {
             if (chunk_pieces[idx].size() > Config::Constants::CHUNK_PIECES_SIZE) {
                 log(node_id, "Error: Chunk " + std::to_string(idx) + " exceeds maximum size for file " + filename);
                 return;
             }
-
+    
             // Create a ChunkSharing message for the current chunk
             ChunkSharing msg(node_id, dest_node_id, filename, range, idx, chunk_pieces[idx]);
-
+    
             // Send the chunk to the destination node
             if (!send_segment(temp_sock, msg.encode(), {dest_ip, dest_port})) {
                 log(node_id, "Error: Failed to send chunk " + std::to_string(idx) + " for file " + filename);
                 return;
             }
-
-            log(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + " for file " + filename);
+    
+            total_bytes_sent += chunk_pieces[idx].size();
+            log(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + 
+                " (" + std::to_string(chunk_pieces[idx].size()) + " bytes) for file " + filename);
         }
     
         // Send a termination signal to indicate the end of transmission
@@ -387,7 +398,14 @@ class Node {
             return;
         }
     
+        auto end_time = std::chrono::high_resolution_clock::now();
+        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+        
         log(node_id, "Finished sending chunks for file: " + filename + " to Node " + std::to_string(dest_node_id));
+        log(node_id, "Total bytes sent: " + std::to_string(total_bytes_sent) + 
+            " in " + std::to_string(duration.count()) + " ms");
+        log(node_id, "Average speed: " + 
+            std::to_string((total_bytes_sent * 1000) / (duration.count() * 1024)) + " KB/s");
     
         // Notify the tracker about the file update
         Node2Tracker to_tracker_msg(node_id, Config::TrackerRequestsMode::UPDATE, filename);
@@ -630,6 +648,8 @@ class Node {
 
     // Function to split the file among available file owners and download it
     static void split_file_owners(std::vector<std::pair<FileOwner, int>>& file_owners, const std::string& filename) {
+        auto download_start_time = std::chrono::high_resolution_clock::now();
+        
         // Filter out the current node from the list of file owners
         std::vector<std::pair<FileOwner, int>> owners;
         for (const auto& owner : file_owners) {
@@ -645,7 +665,7 @@ class Node {
         
         // Select best peers based on latency instead of send frequency
         std::vector<FileOwner> to_be_used_owners = select_best_peers(owners, Config::Constants::MAX_SPLITTNES_RATE);
-
+    
         if (to_be_used_owners.empty()) {
             log(node_id, "No responsive peers found for " + filename);
             return;
@@ -696,7 +716,15 @@ class Node {
             pthread_join(thread, nullptr);
         }
     
-        log(node_id, "All chunks of " + filename + " downloaded. Sorting them now...");
+        auto download_end_time = std::chrono::high_resolution_clock::now();
+        auto download_duration = std::chrono::duration_cast<std::chrono::milliseconds>(download_end_time - download_start_time);
+        
+        log(node_id, "All chunks of " + filename + " downloaded in " + 
+            std::to_string(download_duration.count()) + " ms");
+        log(node_id, "Average download speed: " + 
+            std::to_string((file_size * 1000) / (download_duration.count() * 1024)) + " KB/s");
+    
+        log(node_id, "Sorting chunks now...");
     
         // Sort the downloaded chunks based on their ranges
         std::vector<ChunkSharing> sorted_chunks = sort_downloaded_chunks(filename);
@@ -715,9 +743,18 @@ class Node {
             }
         }
     
+        auto reassemble_start_time = std::chrono::high_resolution_clock::now();
+        
         // Reassemble the file using the sorted chunks and save it
         reassemble_file(sorted_chunks, file_path);
-        log(node_id, filename + " successfully downloaded and saved.");
+        
+        auto reassemble_end_time = std::chrono::high_resolution_clock::now();
+        auto reassemble_duration = std::chrono::duration_cast<std::chrono::milliseconds>(reassemble_end_time - reassemble_start_time);
+        
+        log(node_id, filename + " successfully reassembled in " + 
+            std::to_string(reassemble_duration.count()) + " ms");
+        log(node_id, "Total download and reassembly time: " + 
+            std::to_string((download_duration + reassemble_duration).count()) + " ms");
     
         static std::mutex files_mutex;
         {
@@ -727,7 +764,7 @@ class Node {
     
         // Inform the tracker that this node now has the file
         set_send_mode(filename);
-    }    
+    }
     
     // Reassemble the full file from its received chunks and write to disk
     static void reassemble_file(std::vector<ChunkSharing>& chunks, const std::string& file_path) {
