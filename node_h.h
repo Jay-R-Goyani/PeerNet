@@ -531,6 +531,325 @@ class Node {
         }
     }
 
+
+
+    // File Download Functions
+    // Thread function to set the node in download mode for a specific file
+    static void* set_download_mode(void* arg) {
+        // Extract the filename from the argument
+        std::string filename = *((std::string*)arg);
+
+        // Construct the full file path for the file in the node's directory
+        std::string file_path = std::string(Config::Directory::NODE_FILES_DIR) + "node" + std::to_string(node_id) + "/" + filename;
+
+        // Check if the file already exists in the node's directory
+        struct stat buffer;
+        if (stat(file_path.c_str(), &buffer) == 0) {
+            // Log a message if the file is already present
+            log(node_id, "You already have this file!");
+            return nullptr; // Exit the function as the file is already downloaded
+        } else {
+            // Log a message indicating the start of the search for the file in the torrent
+            log(node_id, "Let's search " + filename + " in the torrent!");
+
+            // Search the torrent system for nodes that have the requested file
+            std::vector<std::pair<FileOwner, int>> file_owners = search_torrent(filename);
+
+            // If no nodes have the file, log a message and exit
+            if (file_owners.empty()) {
+                log(node_id, "No one has " + filename);
+                return nullptr;
+            }
+
+            // Split the file among the available file owners and download it
+            split_file_owners(file_owners, filename);
+        }
+        return nullptr; // Return nullptr when the thread exits
+    }
+
+    // Function to request and retrieve the size of a file from a specific file owner
+    static int ask_file_size(const std::string& filename, const FileOwner& owner) {
+        // Generate a temporary port and socket for communication
+        int temp_port = generate_random_port();
+        int temp_sock = set_socket(temp_port);
+    
+        // Create a Node2Node message to request the file size (size = -1 indicates a request)
+        Node2Node msg(node_id, owner.node_id, filename, -1);
+        send_segment(temp_sock, msg.encode(), {owner.addr.first, owner.addr.second});
+    
+        // Wait for a response from the file owner
+        while (true) {
+            char buffer[Config::Constants::BUFFER_SIZE]; // Buffer to store incoming data
+            sockaddr_in addr; // Address of the sender
+            socklen_t addr_len = sizeof(addr); // Length of the sender's address structure
+
+            // Receive data from the socket
+            int bytes_received = recvfrom(temp_sock, buffer, sizeof(buffer), 0, (sockaddr*)&addr, &addr_len);
+            if (bytes_received > 0) {
+                // Decode the received data into a Node2Node object
+                Node2Node result = Node2Node::decode(std::vector<char>(buffer, buffer + bytes_received));
+                int size = result.size;
+
+                // If a valid size is received, close the socket and return the size
+                if (size > 0) {
+                    free_socket(temp_sock);
+                    return size;
+                }
+            }
+        }
+    }
+
+    // Function to split the file among available file owners and download it
+    static void split_file_owners(std::vector<std::pair<FileOwner, int>>& file_owners, const std::string& filename) {
+        // Filter out the current node from the list of file owners
+        std::vector<std::pair<FileOwner, int>> owners;
+        for (const auto& owner : file_owners) {
+            // Skip the current node (node_id is excluded from owners)
+            if (owner.first.node_id != node_id) {
+                owners.push_back(owner);
+            }
+        }
+    
+        // If no other node has the file, log the message and return
+        if (owners.empty()) {
+            log(node_id, "No one has " + filename);
+            return;
+        }
+    
+        // Sort owners by their send frequency (descending order)
+        std::sort(owners.begin(), owners.end(), [](std::pair<FileOwner, int>& a, std::pair<FileOwner, int>& b) {
+            return a.second > b.second;  // Sort by frequency of sending chunks
+        });
+    
+        // Select the top file owners (up to MAX_SPLITTNES_RATE)
+        std::vector<FileOwner> to_be_used_owners;
+        for (int i = 0; i < std::min((int)owners.size(), Config::Constants::MAX_SPLITTNES_RATE); i++) {
+            to_be_used_owners.push_back(owners[i].first);  // Add the owner with highest send frequency
+        }
+    
+        // Log the nodes we will download the file from
+        std::string log_content = "Downloading " + filename + " from nodes: ";
+        for (const auto& owner : to_be_used_owners) {
+            log_content += std::to_string(owner.node_id) + " ";  // Append each node_id to the log
+        }
+        log(node_id, log_content);
+    
+        // Request the file size from the first peer (to determine the file size for splitting)
+        int file_size = ask_file_size(filename, to_be_used_owners[0]);
+        log(node_id, "File " + filename + " size: " + std::to_string(file_size) + " bytes");
+    
+        // Split the file equally among the selected peers
+        int step = file_size / to_be_used_owners.size();  // Size of each chunk
+        int remainder = file_size % to_be_used_owners.size();  // Remainder to be distributed
+        std::vector<std::pair<int, int>> chunks_ranges;  // To store chunk ranges (start, end)
+        for (int i = 0; i < to_be_used_owners.size(); i++) {
+            int start = step * i;
+            int end = (i == to_be_used_owners.size() - 1) ? start + step + remainder : start + step;
+            chunks_ranges.emplace_back(start, end);  // Define the chunk range for each owner
+        }
+    
+        // Lock mutex to ensure thread-safety when modifying the downloaded_files map
+        static std::mutex downloaded_files_mutex;
+        {
+            std::lock_guard<std::mutex> lock(downloaded_files_mutex);
+            downloaded_files[filename] = {};  // Initialize the map for this file
+        }
+    
+        // Create threads to download chunks concurrently
+        std::vector<pthread_t> threads(to_be_used_owners.size());
+        for (size_t i = 0; i < to_be_used_owners.size(); i++) {
+            // Prepare arguments for each thread (filename, chunk range, and owner)
+            auto args = new std::tuple<std::string, std::pair<int, int>, FileOwner>(filename, chunks_ranges[i], to_be_used_owners[i]);
+            
+            // Create a new thread to download the chunk
+            if (pthread_create(&threads[i], nullptr, receive_chunk, args) != 0) {
+                log(node_id, "Error: Failed to create thread for chunk " + std::to_string(i));
+                delete args;  // Free memory if thread creation fails
+            }
+        }
+    
+        // Wait for all threads to finish downloading their respective chunks
+        for (auto& thread : threads) {
+            pthread_join(thread, nullptr);
+        }
+    
+        // Log the completion of chunk downloading and proceed to sort the chunks
+        log(node_id, "All chunks of " + filename + " downloaded. Sorting them now...");
+    
+        // Sort the downloaded chunks based on their ranges
+        std::vector<ChunkSharing> sorted_chunks = sort_downloaded_chunks(filename);
+        log(node_id, "All chunks sorted. Reassembling file...");
+    
+        // Reassemble the file from sorted chunks
+        std::string file_path = std::string(Config::Directory::NODE_FILES_DIR) + 
+                                "node" + std::to_string(node_id) + "/" + filename;
+    
+        // Ensure the directory for saving the file exists
+        std::string dir_path = std::string(Config::Directory::NODE_FILES_DIR) + 
+                               "node" + std::to_string(node_id);
+        struct stat st;
+        if (stat(dir_path.c_str(), &st) != 0) {
+            if (mkdir(dir_path.c_str(), 0755) != 0) {
+                log(node_id, "Error creating directory: " + dir_path + " (" + strerror(errno) + ")");
+                return;  // Return if directory creation fails
+            }
+        }
+    
+        // Reassemble the file using the sorted chunks and save it
+        reassemble_file(sorted_chunks, file_path);
+        log(node_id, filename + " successfully downloaded and saved.");
+    
+        // Lock mutex to ensure thread-safety when modifying the 'files' set
+        static std::mutex files_mutex;
+        {
+            std::lock_guard<std::mutex> lock(files_mutex);
+            files.insert(filename);  // Mark the file as downloaded
+        }
+    
+        // Inform the tracker that this node now has the file
+        set_send_mode(filename);
+    }    
+    
+    // Reassemble the full file from its received chunks and write to disk
+    static void reassemble_file(std::vector<ChunkSharing>& chunks, const std::string& file_path) {
+        if (chunks.empty()) {
+            log(node_id, "Error: No chunks provided for reassembly");
+            return;
+        }
+
+        // Open the output file in binary write mode, truncating any existing content
+        std::ofstream file(file_path, std::ios::binary | std::ios::out | std::ios::trunc);
+        if (!file) {
+            log(node_id, "Failed to open file: " + file_path + " while assembling");
+            return;
+        }
+
+        // Write each chunk to the file
+        for (const auto& chunk : chunks) {
+            if (!file.write(chunk.chunk.data(), chunk.chunk.size())) {
+                log(node_id, "Error: Failed to write chunk to file " + file_path);
+                return;
+            }
+        }
+
+        chunks.clear(); // Clear chunk vector after writing
+
+        // Ensure all data is flushed to disk
+        if (!file.flush()) {
+            log(node_id, "Error: Failed to flush file " + file_path);
+            return;
+        }
+
+        file.close(); // Close the file
+
+        log(node_id, "File successfully reassembled: " + file_path);
+    }
+
+    // Thread function to request and receive a file chunk from another node
+    static void* receive_chunk(void* arg) {
+        // Extract arguments: filename, chunk range, and file owner's info
+        auto* args = static_cast<std::tuple<std::string, std::pair<int, int>, FileOwner>*>(arg);
+        std::string filename = std::get<0>(*args);
+        std::pair<int, int> range = std::get<1>(*args);
+        FileOwner file_owner = std::get<2>(*args);
+        delete args;
+
+        int dest_node_id = file_owner.node_id;
+
+        // Set up a temporary socket for receiving the chunk
+        int temp_port = generate_random_port();
+        int temp_sock = set_socket(temp_port);
+        if (temp_sock < 0) {
+            log(node_id, "Error: Failed to create temporary socket");
+            return nullptr;
+        }
+
+        // Send a request message for the chunk (idx = -1 indicates request)
+        ChunkSharing msg(node_id, dest_node_id, filename, range, -1);
+        if (!send_segment(temp_sock, msg.encode(), {file_owner.addr.first, file_owner.addr.second})) {
+            log(node_id, "Error: Failed to send request for chunk of " + filename + " to node " + std::to_string(dest_node_id));
+            free_socket(temp_sock);
+            return nullptr;
+        }
+
+        // Log the outgoing request
+        log(node_id, "I sent a request for a chunk of " + filename + " for node " + std::to_string(dest_node_id));
+
+        int retry_count = 0;
+        const int MAX_RETRIES = 10;
+
+        // Try receiving the chunk with retry mechanism
+        while (retry_count < MAX_RETRIES) {
+            std::vector<char> buffer(Config::Constants::BUFFER_SIZE);
+            sockaddr_in sender_addr;
+            socklen_t sender_len = sizeof(sender_addr);
+
+            ssize_t bytes_received = recvfrom(temp_sock, buffer.data(), buffer.size(), 0, (sockaddr*)&sender_addr, &sender_len);
+            if (bytes_received <= 0) {
+                retry_count++;
+                continue;
+            }
+
+            // Decode the received data into a ChunkSharing object
+            ChunkSharing result = ChunkSharing::decode(std::vector<char>(buffer.begin(), buffer.begin() + bytes_received));
+            int idx = result.idx;
+
+            // If idx = -1, it indicates the end of transmission
+            if (idx == -1) {
+                free_socket(temp_sock);
+                return nullptr;
+            }
+
+            // Store the received chunk in a thread-safe manner
+            {
+                std::lock_guard<std::mutex> lock(download_mutex);
+                downloaded_files[filename].push_back(result);
+            }
+
+            retry_count = 0; // Reset retries after a successful receive
+        }
+
+        // If retries exceeded, log an error and exit
+        log(node_id, "Error: Maximum retries reached for receiving chunks of " + filename);
+        free_socket(temp_sock);
+        return nullptr;
+    }
+
+    // Sorts and returns the downloaded chunks of a file based on range and chunk index
+    static std::vector<ChunkSharing> sort_downloaded_chunks(const std::string& filename) {
+        // Check if the file has any downloaded chunks
+        if (downloaded_files.find(filename) == downloaded_files.end()) {
+            log(node_id, "No downloaded chunks found for " + filename);
+            return {};
+        }
+
+        auto& chunks = downloaded_files[filename];
+
+        // Sort chunks by start of range, then by chunk index
+        std::sort(chunks.begin(), chunks.end(),
+            [](const ChunkSharing& a, const ChunkSharing& b) {
+                if (a.range.first != b.range.first)
+                    return a.range.first < b.range.first;
+                return a.idx < b.idx;
+            });
+
+        return chunks;
+    }
+
+    // Search for file owners
+    void search_file_owners(std::string& filename) {
+        std::vector<std::pair<FileOwner, int>> file_owners = search_torrent(filename);
+        
+        if (file_owners.empty()) {
+            std::cout << "No owners found for file: " << filename << std::endl;
+        } else {
+            std::cout << "Owners of file " << filename << ":" << std::endl;
+            for (const auto& owner : file_owners) {
+                std::cout << "Node " << owner.first.node_id << " (" << owner.first.addr.first << ":" << owner.first.addr.second << ")" << std::endl;
+            }
+        }
+    }
+
 };
 
 #endif
