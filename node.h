@@ -396,8 +396,27 @@ class Node {
         }
     }
 
+    // Thread function to handle ping requests (run in listen thread)
+    static void handle_ping_request(const sockaddr_in& addr) {
+        const std::string pong_msg = "PONG";
+        std::string ip_str = inet_ntoa(addr.sin_addr);
+        int port = ntohs(addr.sin_port);    
+        std::cout << "Received PING " << ip_str << ":" << port << std::endl;
+        send_segment(send_socket, std::vector<char>(pong_msg.begin(), pong_msg.end()), {ip_str, port});  
+        std::cout << "Sending PONG " << ip_str << ":" << port << std::endl;
+    }
+
     // Handles incoming requests from other nodes
     static void handle_requests(char buffer[], int bytes_received, const sockaddr_in& addr) {
+
+        std::string msg(buffer, bytes_received);
+        
+        // Handle ping-pong messages first
+        if (msg == "PING") {
+            handle_ping_request(addr);
+            return;
+        } 
+
         std::unordered_map<std::string, std::any> properties = Message::decode(std::vector<char>(buffer, buffer + bytes_received));
         
         std::string filename = std::any_cast<std::string>(properties.at("filename"));
@@ -534,6 +553,81 @@ class Node {
         }
     }
 
+    // Measures latency to a peer using UDP ping-pong
+    static long measure_latency(const std::string& ip, int port, int node_id) {
+        int temp_port = generate_random_port();
+        int temp_sock = set_socket(temp_port);
+        if (temp_sock < 0) {
+            log(node_id, "Error creating socket for latency measurement");
+            return -1;
+        }
+
+        // Set timeout for ping
+        struct timeval timeout;
+        timeout.tv_sec = 5;  // 5 second timeout
+        timeout.tv_usec = 0;
+        setsockopt(temp_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        const std::string ping_msg = "PING";
+        auto start = std::chrono::high_resolution_clock::now();
+
+        log(node_id, "Sending PING to " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
+        // Send ping
+        if (!send_segment(temp_sock, std::vector<char>(ping_msg.begin(), ping_msg.end()), {ip, port})) {
+            free_socket(temp_sock);
+            return -1;
+        }
+
+        // Wait for pong
+        char buffer[Config::Constants::BUFFER_SIZE];
+        sockaddr_in from_addr;
+        socklen_t from_len = sizeof(from_addr);
+        ssize_t recv_len = recvfrom(temp_sock, buffer, sizeof(buffer), 0,
+                                   (struct sockaddr*)&from_addr, &from_len);
+
+        log(node_id, "Received PONG from " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
+
+        free_socket(temp_sock);
+
+        if (recv_len <= 0) {            
+            return -1;  // Timeout or error
+        }
+
+        auto end = std::chrono::high_resolution_clock::now();
+        long latency = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();     
+        std::cout << "Latency to " << ip << ":" << port << " is " << latency << "ms" << std::endl;
+        return latency;
+    }
+
+    // Selects best K peers based on latency
+    static std::vector<FileOwner> select_best_peers(const std::vector<std::pair<FileOwner, int>>& peers, int k) {
+        std::vector<std::pair<FileOwner, long>> peers_with_latency;
+        
+        // Measure latency to each peer
+        for (const auto& peer : peers) {
+            long latency = measure_latency(peer.first.addr.first, peer.first.addr.second, peer.first.node_id);
+            if (latency >= 0) {  // Only consider responsive peers
+                peers_with_latency.emplace_back(peer.first, latency);
+                log(node_id, "Latency to node " + std::to_string(peer.first.node_id) + 
+                    ": " + std::to_string(latency) + "ms");
+            }
+        }
+        
+        // Sort by latency (ascending)
+        std::sort(peers_with_latency.begin(), peers_with_latency.end(),
+            [](const auto& a, const auto& b) {
+                return a.second < b.second;
+            });
+        
+        // Select top K peers
+        std::vector<FileOwner> best_peers;
+        for (int i = 0; i < std::min(k, (int)peers_with_latency.size()); i++) {
+            best_peers.push_back(peers_with_latency[i].first);
+        }
+        
+        return best_peers;
+    }
+
     // Function to split the file among available file owners and download it
     static void split_file_owners(std::vector<std::pair<FileOwner, int>>& file_owners, const std::string& filename) {
         // Filter out the current node from the list of file owners
@@ -548,16 +642,13 @@ class Node {
             log(node_id, "No one has " + filename);
             return;
         }
-    
-        // Sort owners by their send frequency (descending order)
-        std::sort(owners.begin(), owners.end(), [](std::pair<FileOwner, int>& a, std::pair<FileOwner, int>& b) {
-            return a.second > b.second;  
-        });
-    
-        // Select the top file owners (up to MAX_SPLITTNES_RATE)
-        std::vector<FileOwner> to_be_used_owners;
-        for (int i = 0; i < std::min((int)owners.size(), Config::Constants::MAX_SPLITTNES_RATE); i++) {
-            to_be_used_owners.push_back(owners[i].first);  
+        
+        // Select best peers based on latency instead of send frequency
+        std::vector<FileOwner> to_be_used_owners = select_best_peers(owners, Config::Constants::MAX_SPLITTNES_RATE);
+
+        if (to_be_used_owners.empty()) {
+            log(node_id, "No responsive peers found for " + filename);
+            return;
         }
     
         std::string log_content = "Downloading " + filename + " from nodes: ";
