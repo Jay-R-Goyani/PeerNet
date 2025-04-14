@@ -22,7 +22,7 @@ namespace Config {
         static constexpr int AVAILABLE_PORT_MIN = 1024;   // Minimum available port number
         static constexpr int AVAILABLE_PORT_MAX = 65535;  // Maximum available port number
 
-        static constexpr const char* TRACKER_IP = "192.168.214.1"; // Tracker server IP address
+        static constexpr const char* TRACKER_IP = "127.0.0.1"; // Tracker server IP address
         static constexpr int TRACKER_PORT = 12345;        // Tracker server port number
 
         static constexpr int MAX_UDP_SEGMENT_DATA_SIZE = 65527;  // Maximum UDP segment size

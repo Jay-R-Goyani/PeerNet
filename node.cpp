@@ -1,7 +1,7 @@
 #define _Alignof(x) __alignof__(x)
 #include <iostream>
 
-#include "node_h.h"
+#include "node.h"
 
 int Node::node_id;
 int Node::send_socket;
