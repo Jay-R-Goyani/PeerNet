@@ -228,6 +228,309 @@ class Node {
         return nullptr; // Return nullptr when the thread exits
     }
 
+    // Searches the torrent system for nodes that have the specified file
+    static std::vector<std::pair<FileOwner, int>> search_torrent(std::string &filename) {
+        // Create a message to request the file from the tracker
+        Node2Tracker msg(node_id, Config::TrackerRequestsMode::NEED, filename);
+
+        // Generate a temporary port and socket for communication
+        int temp_port = generate_random_port();
+        int temp_sock = set_socket(temp_port);
+
+        // Send the request message to the tracker
+        send_segment(temp_sock, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});
+        
+        // Wait for a response from the tracker
+        while (true) {
+            char buffer[Config::Constants::BUFFER_SIZE]; // Buffer to store incoming data
+            sockaddr_in addr; // Address of the sender
+            socklen_t addr_len = sizeof(addr); // Length of the sender's address structure
+
+            // Receive data from the tracker
+            int bytes_received = recvfrom(temp_sock, buffer, sizeof(buffer), 0, (struct sockaddr*)&addr, &addr_len);
+            if (bytes_received > 0) {
+                // Decode the received data into a Tracker2Node object
+                Tracker2Node result = Tracker2Node::decode(std::vector<char>(buffer, buffer + bytes_received));
+
+                // Return the search result containing file owners
+                return result.search_result;
+            }
+        }
+    }
+        
+
+
+    // File Sharing Functions
+    // Sends the size of the requested file to the requesting node
+    static void send_file_size(Node2Node &result, const sockaddr_in& addr) {
+        // Extract the filename from the request
+        std::string filename = result.filename;
+
+        // Construct the full file path
+        std::string file_path = std::string(Config::Directory::NODE_FILES_DIR) + 
+                              "node" + std::to_string(node_id) + "/" + filename;
+    
+        // Check if the file exists and retrieve its metadata using stat
+        struct stat file_stat;
+        if (stat(file_path.c_str(), &file_stat) != 0) {
+            // Log an error if the file doesn't exist or another error occurs
+            log(node_id, "File not found: " + filename + (errno != ENOENT ? " (" + std::string(strerror(errno)) + ")" : ""));
+            return;
+        }
+    
+        // Verify that the path corresponds to a regular file
+        if (!S_ISREG(file_stat.st_mode)) {
+            log(node_id, "Path is not a regular file: " + filename);
+            return;
+        }
+    
+        // Retrieve the file size from the stat structure
+        int size = file_stat.st_size;
+        int dest_node_id = result.src_node_id; // Extract the source node ID from the request
+    
+        // Create a Node2Node message containing the file size
+        Node2Node msg(node_id, dest_node_id, filename, size);
+
+        // Convert the IP address from binary to string format
+        std::string ip_str = inet_ntoa(addr.sin_addr);
+
+        // Convert the port from network byte order to host byte order
+        int port = ntohs(addr.sin_port);
+
+        // Send the file size to the requesting node
+        send_segment(send_socket, msg.encode(), {ip_str, port});
+    }
+
+    // Splits a file into chunks based on the specified range
+    static std::vector<std::vector<char>> split_file_to_chunks(const std::string& file_path, std::pair<int, int> rng) {
+        std::vector<std::vector<char>> chunks; // Vector to store the resulting chunks
+
+        // Open the file in binary mode
+        std::ifstream file(file_path, std::ios::binary);
+        if (!file) {
+            // Log an error if the file cannot be opened
+            std::cerr << "Error opening file: " << std::strerror(errno) << std::endl;
+            return chunks;
+        }
+    
+        // Validate the specified range
+        if (rng.first < 0 || rng.second < rng.first) {
+            std::cerr << "Invalid range specified" << std::endl;
+            return chunks;
+        }
+    
+        // Seek to the start position of the range
+        file.seekg(rng.first, std::ios::beg);
+        if (!file) {
+            // Log an error if seeking fails
+            std::cerr << "Error seeking in file: " << std::strerror(errno) << std::endl;
+            return chunks;
+        }
+    
+        // Calculate the size of the chunk to be read
+        size_t chunk_size = rng.second - rng.first;
+        std::vector<char> buffer(chunk_size); // Buffer to hold the chunk data
+    
+        // Read the chunk from the file
+        file.read(buffer.data(), chunk_size);
+        size_t bytes_read = file.gcount(); // Get the number of bytes actually read
+        if (bytes_read != chunk_size) {
+            // Log an error if the number of bytes read is less than expected
+            std::cerr << "Error reading file: only " << bytes_read << " bytes read out of " << chunk_size << std::endl;
+            return chunks;
+        }
+    
+        // Split the buffer into smaller pieces based on the configured piece size
+        size_t piece_size = Config::Constants::CHUNK_PIECES_SIZE;
+        if (piece_size == 0) {
+            // Log an error if the piece size is invalid
+            std::cerr << "Invalid piece size: must be greater than 0" << std::endl;
+            return chunks;
+        }
+    
+        // Iterate through the buffer and create smaller pieces
+        for (size_t p = 0; p < buffer.size(); p += piece_size) {
+            size_t end = std::min(p + piece_size, buffer.size()); // Calculate the end of the current piece
+            chunks.emplace_back(buffer.begin() + p, buffer.begin() + end); // Add the piece to the chunks vector
+        }
+    
+        return chunks; // Return the vector of chunks
+    }
+
+    // Sends a chunk of a file to a destination node
+    static void send_chunk(const std::string& filename, std::pair<int, int> range, int dest_node_id, int dest_port, const std::string& dest_ip) {
+        // Validate the specified range
+        if (range.first < 0 || range.second < 0 || range.first > range.second) {
+            log(node_id, "Error: Invalid range specified for file " + filename);
+            return;
+        }
+    
+        // Construct the full file path
+        std::string file_path = std::string(Config::Directory::NODE_FILES_DIR) + 
+                              "node" + std::to_string(node_id) + "/" + 
+                              filename;
+    
+        // Verify that the file exists and is accessible
+        struct stat file_stat;
+        if (stat(file_path.c_str(), &file_stat) != 0 || !S_ISREG(file_stat.st_mode)) {
+            log(node_id, "Error: File not found or inaccessible: " + filename + 
+                (errno != ENOENT ? " (" + std::string(strerror(errno)) + ")" : ""));
+            return;
+        }
+    
+        // Split the file into chunks based on the specified range
+        std::vector<std::vector<char>> chunk_pieces = split_file_to_chunks(file_path, range);
+        if (chunk_pieces.empty()) {
+            log(node_id, "Error: Failed to split file into chunks for " + filename);
+            return;
+        }
+    
+        // Create a temporary socket for sending chunks
+        static std::mutex socket_mutex;
+        int temp_port, temp_sock;
+        {
+            std::lock_guard<std::mutex> lock(socket_mutex);
+            temp_port = generate_random_port(); // Generate a random port
+            temp_sock = set_socket(temp_port); // Create and bind the socket
+        }
+        if (temp_sock < 0) {
+            log(node_id, "Error: Failed to create temporary socket.");
+            return;
+        }
+    
+        // Send each chunk to the destination node
+        for (size_t idx = 0; idx < chunk_pieces.size(); ++idx) {
+            // Validate the size of the chunk
+            if (chunk_pieces[idx].size() > Config::Constants::CHUNK_PIECES_SIZE) {
+                log(node_id, "Error: Chunk " + std::to_string(idx) + " exceeds maximum size for file " + filename);
+                return;
+            }
+
+            // Create a ChunkSharing message for the current chunk
+            ChunkSharing msg(node_id, dest_node_id, filename, range, idx, chunk_pieces[idx]);
+
+            // Send the chunk to the destination node
+            if (!send_segment(temp_sock, msg.encode(), {dest_ip, dest_port})) {
+                log(node_id, "Error: Failed to send chunk " + std::to_string(idx) + " for file " + filename);
+                return;
+            }
+
+            // Log the successful transmission of the chunk
+            log(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + " for file " + filename);
+        }
+    
+        // Send a termination signal to indicate the end of transmission
+        ChunkSharing msg(node_id, dest_node_id, filename, range, -1, {});
+        if (!send_segment(temp_sock, msg.encode(), {dest_ip, dest_port})) {
+            log(node_id, "Error: Failed to send termination signal for file " + filename);
+            return;
+        }
+    
+        // Log the completion of chunk transmission
+        log(node_id, "Finished sending chunks for file: " + filename + " to Node " + std::to_string(dest_node_id));
+    
+        // Notify the tracker about the file update
+        Node2Tracker to_tracker_msg(node_id, Config::TrackerRequestsMode::UPDATE, filename);
+        if (!send_segment(temp_sock, to_tracker_msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT})) {
+            log(node_id, "Error: Failed to notify tracker about file " + filename);
+        }
+    }
+
+    // Handles incoming requests from other nodes
+    static void handle_requests(char buffer[], int bytes_received, const sockaddr_in& addr) {
+        // Decode the received message into a map of properties
+        std::unordered_map<std::string, std::any> properties = Message::decode(std::vector<char>(buffer, buffer + bytes_received));
+        
+        // Extract the filename from the decoded properties
+        std::string filename = std::any_cast<std::string>(properties.at("filename"));
+
+        // Check if the message contains a "size" property
+        if (properties.find("size") != properties.end()) {
+            // Decode the message as a Node2Node message
+            Node2Node result = Node2Node::decode(std::vector<char>(buffer, buffer + bytes_received));
+
+            int size = result.size;
+            if (size == -1) {
+                // If size is -1, it indicates a request for the file size
+                log(node_id, "Received a request for size of " + filename);
+                send_file_size(result, addr); // Respond with the file size
+            }
+        } 
+        // Check if the message contains a "range_start" property
+        else if (properties.find("range_start") != properties.end()) {
+            // Decode the message as a ChunkSharing message
+            ChunkSharing result = ChunkSharing::decode(std::vector<char>(buffer, buffer + bytes_received));
+
+            // Extract the range and source node ID from the message
+            std::pair<int, int> range = result.range;
+            int dest_node_id = result.src_node_id;
+
+            // Convert the sender's IP address from binary to string format
+            char ipStr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &(addr.sin_addr), ipStr, INET_ADDRSTRLEN);
+            std::string dest_IP_addr(ipStr);  // Store IP as a C++ string
+
+            // Convert the sender's port from network byte order to host byte order
+            int dest_port = ntohs(addr.sin_port);
+
+            // Extract the chunk data from the message
+            std::vector<char> chunk = result.chunk;
+
+            // If the chunk is empty, it indicates a request for the chunk
+            if (chunk.empty()) {
+                send_chunk(filename, range, dest_node_id, dest_port, dest_IP_addr); // Send the requested chunk
+            }
+        }
+    }
+
+    // Thread function to listen for incoming requests from other nodes
+    static void* listen(void* arg) {
+        while (true) {
+            char buffer[Config::Constants::BUFFER_SIZE]; // Buffer to store incoming data
+            sockaddr_in addr; // Address of the sender
+            socklen_t addr_len = sizeof(addr); // Length of the sender's address structure
+
+            // Receive data from the socket
+            int bytes_received = recvfrom(send_socket, buffer, sizeof(buffer), 0, (struct sockaddr*)&addr, &addr_len);
+
+            // If data is received, handle the request
+            if (bytes_received > 0) {
+                handle_requests(buffer, bytes_received, addr); // Process the received request
+            }
+        }
+        return nullptr; // Return nullptr when the thread exits
+    }
+
+    // Sets the node to send mode for the specified file
+    static void set_send_mode(const std::string& filename) {
+        // Check if the file exists in the node's owned files
+        if (files.find(filename) == files.end()) {
+            log(node_id, "You don't have " + filename); // Log an error if the file is not found
+            return;
+        }
+
+        // Notify the tracker that this node owns the file
+        Node2Tracker msg(node_id, Config::TrackerRequestsMode::OWN, filename);
+        send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});  
+
+        // If the node is not already in send mode, enable it
+        if (!is_in_send_mode) {
+            is_in_send_mode = true; // Set the send mode flag to true
+
+            log(node_id, "FILE ENTRY REGISTERED! You are waiting for other nodes' requests!"); // Log the status
+
+            // Start a listener thread to handle incoming requests
+            pthread_t listener_thread;
+            pthread_create(&listener_thread, nullptr, listen, nullptr);
+            pthread_detach(listener_thread); // Detach the thread to allow it to run independently
+            
+        } else {
+            // Log a message if the node is already in send mode
+            log(node_id, "You are already in send mode!");
+            return;
+        }
+    }
+
 };
 
 #endif
