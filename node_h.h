@@ -32,6 +32,8 @@
 #include "messages/node2tracker.h"
 #include "messages/chunk_sharing.h"
 
+static std::mutex download_mutex; // Mutex for synchronizing access to downloaded_files
+
 class Node {
     public:
     static int node_id;                                                                   // Node ID

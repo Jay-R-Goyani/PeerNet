@@ -1,3 +1,4 @@
+#define _Alignof(x) __alignof__(x)
 #include <iostream>
 
 #include "node_h.h"
@@ -7,8 +8,6 @@ int Node::send_socket;
 std::unordered_set<std::string> Node::files;
 std::unordered_map<std::string, std::vector<ChunkSharing>> Node::downloaded_files;
 bool Node::is_in_send_mode;
-
-static std::mutex download_mutex; // Mutex for synchronizing access to downloaded_files
 
 // Main function to start the node with given node_id
 void run(int node_id) {
@@ -71,12 +70,16 @@ void run(int node_id) {
     }
 }
 
+
 int main(int argc, char* argv[]) {
     if (argc != 2) {
         std::cerr << "Usage: " << argv[0] << " <node_id>" << std::endl;
         return 1;
     }
+    // Convert the node_id from string to integer
     int node_id = std::stoi(argv[1]);
+
+    // Run the node with the specified node_id
     run(node_id);
     return 0;
 }
