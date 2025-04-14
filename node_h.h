@@ -147,6 +147,87 @@ class Node {
         return true; // Return true if the data was successfully sent
     }
 
+
+    // Tracker Communication Functions
+    // Function to register the node in the torrent system by informing the tracker
+    void enter_torrent() {
+        // Create a message to register the node with the tracker
+        Node2Tracker msg(node_id, Config::TrackerRequestsMode::REGISTER, "");
+
+        // Send the registration message to the tracker
+        send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});
+
+        // Set a timeout for receiving the acknowledgment (ACK) from the tracker
+        struct timeval timeout;
+        timeout.tv_sec = 2;  // Timeout duration: 2 seconds
+        timeout.tv_usec = 0;
+        setsockopt(send_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+        // Buffer to store the received ACK
+        char buffer[Config::Constants::BUFFER_SIZE];
+        sockaddr_in from_addr; // Address of the sender
+        socklen_t from_len = sizeof(from_addr); // Length of the sender's address structure
+
+        // Attempt to receive the ACK from the tracker
+        ssize_t recv_len = recvfrom(send_socket, buffer, sizeof(buffer), 0,
+                                    (struct sockaddr*)&from_addr, &from_len);
+
+        // Check if an ACK was received
+        if (recv_len > 0) {
+            // Convert the received data into a string
+            std::string ack(buffer, buffer + recv_len);
+
+            // Verify if the received message is an ACK
+            if (ack == "ACK") {
+                log(node_id, "ACK received from Tracker"); // Log successful registration
+            } else {
+                log(node_id, "Unexpected message instead of ACK: " + ack); // Log unexpected message
+            }
+        } else {
+            // Log a timeout or failure to receive ACK
+            log(node_id, "ACK not received within timeout. Tracker might be down.");
+            return;
+        }
+
+        // Log successful entry into the torrent system
+        log(node_id, "Entered Torrent.");
+    }
+
+    // Function to gracefully exit the torrent system
+    void exit_torrent() {
+        // Create a message to notify the tracker that this node is exiting
+        Node2Tracker msg(node_id, Config::TrackerRequestsMode::EXIT, "");
+
+        // Send the exit message to the tracker
+        send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});
+
+        // Log the exit event
+        log(node_id, "You exited the torrent!");
+    }
+
+    // Thread function to periodically inform the tracker that the node is still active
+    static void* inform_tracker_periodically(void* arg) {
+        // Interval between heartbeat messages (in seconds)
+        int interval = Config::Constants::NODE_TIME_INTERVAL;
+
+        while (true) {
+            // Log a message indicating that the tracker is being informed
+            std::string log_contain = "I informed the tracker that I'm still alive in the torrent!";
+            log(node_id, log_contain);
+
+            // Create a heartbeat message to notify the tracker
+            Node2Tracker msg(node_id, Config::TrackerRequestsMode::HEARTBEAT, "");
+
+            // Send the heartbeat message to the tracker
+            send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});
+
+            // Sleep for the specified interval before sending the next heartbeat
+            sleep(interval);
+        }
+
+        return nullptr; // Return nullptr when the thread exits
+    }
+
 };
 
 #endif
