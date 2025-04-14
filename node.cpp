@@ -7,7 +7,6 @@ int Node::node_id;
 int Node::send_socket;
 std::unordered_set<std::string> Node::files;
 std::unordered_map<std::string, std::vector<ChunkSharing>> Node::downloaded_files;
-bool Node::is_in_send_mode;
 
 // Main function to start the node with given node_id
 void run(int node_id) {

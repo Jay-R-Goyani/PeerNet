@@ -32,6 +32,7 @@
 #include "messages/node2tracker.h"
 #include "messages/chunk_sharing.h"
 
+
 static std::mutex download_mutex; // Mutex for synchronizing access to downloaded_files
 
 class Node {
@@ -40,14 +41,12 @@ class Node {
     static int send_socket;                                                               // Socket for sending messages
     static std::unordered_set<std::string> files;                                         // Set of files owned by this node
     static std::unordered_map<std::string, std::vector<ChunkSharing>> downloaded_files;   // Map of downloaded files and their chunks
-    static bool is_in_send_mode;                                                         // Flag to indicate if the node is in send mode
 
     // Initialize the node with the given ID, receive port, and send port
     static void init(int id, int rcv_port, int send_port) {
         node_id = id; // Set the node ID
         send_socket = set_socket(send_port); // Create and bind the send socket
         files = fetch_owned_files(); // Fetch the list of files owned by this node
-        is_in_send_mode = false; // Set the initial mode to not in send mode
     }
     
     // Fetch the list of files owned by this node
@@ -515,22 +514,14 @@ class Node {
         Node2Tracker msg(node_id, Config::TrackerRequestsMode::OWN, filename);
         send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});  
 
-        // If the node is not already in send mode, enable it
-        if (!is_in_send_mode) {
-            is_in_send_mode = true; // Set the send mode flag to true
+        // Log the successful registration of the file
+        log(node_id, "FILE ENTRY REGISTERED! You are waiting for other nodes' requests!"); // Log the status
+        
+        // Start a listener thread to handle incoming requests
+        pthread_t listener_thread;
+        pthread_create(&listener_thread, nullptr, listen, nullptr);
+        pthread_detach(listener_thread); // Detach the thread to allow it to run independently
 
-            log(node_id, "FILE ENTRY REGISTERED! You are waiting for other nodes' requests!"); // Log the status
-
-            // Start a listener thread to handle incoming requests
-            pthread_t listener_thread;
-            pthread_create(&listener_thread, nullptr, listen, nullptr);
-            pthread_detach(listener_thread); // Detach the thread to allow it to run independently
-            
-        } else {
-            // Log a message if the node is already in send mode
-            log(node_id, "You are already in send mode!");
-            return;
-        }
     }
 
 
