@@ -15,7 +15,6 @@ void run(int node_id) {
     // Initialize the node with the given node_id and randomly generated ports
     node.init(node_id, generate_random_port(), generate_random_port());
 
-    // Log a startup message
     std::string log_content = "********** Node program started just right now! **********";
     log(node_id, log_content);
 
@@ -25,15 +24,14 @@ void run(int node_id) {
     // Start a background thread that periodically informs the tracker
     pthread_t timer_thread;
     pthread_create(&timer_thread, nullptr, node.inform_tracker_periodically, nullptr);
-    pthread_detach(timer_thread); // Detach the thread so it runs in the background independently
+    pthread_detach(timer_thread); 
 
-    // Display the user interface and available commands
     std::cout << "********** ENTER YOUR COMMAND! **********" << std::endl;
     std::cout << "Available commands: send <filename>, download <filename>, search <filename>, exit" << std::endl;
 
     std::string command;
     while (true) {
-        std::getline(std::cin, command); // Read the full user input line
+        std::getline(std::cin, command); 
 
         // Parse the command into <mode> and <filename>
         std::pair<std::string, std::string> cmd = parse_command(command);
@@ -51,7 +49,7 @@ void run(int node_id) {
             // Start a new thread to handle downloading the specified file
             pthread_t timer_thread;
             pthread_create(&timer_thread, nullptr, node.set_download_mode, &filename);
-            pthread_detach(timer_thread); // Detach the thread to allow async downloading
+            pthread_detach(timer_thread);
 
         } else if (mode == "search") {
             // Search for nodes that have the specified file
