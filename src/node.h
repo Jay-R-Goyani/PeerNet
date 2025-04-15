@@ -435,8 +435,7 @@ class Node {
             }
     
             total_bytes_sent += chunk_pieces[idx].size();
-            log(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + 
-                " (" + std::to_string(chunk_pieces[idx].size()) + " bytes) for file " + filename);
+            // log(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + " (" + std::to_string(chunk_pieces[idx].size()) + " bytes) for file " + filename);
         }
     
         // Send a termination signal to indicate the end of transmission
