@@ -1,0 +1,30 @@
+System Workflow:
+
+Continuing from 1 to 1:
+    - now node 1 and node 3 both have `sample.pdf`
+
+1. Node 3 Startup (Downloader):
+    - Sends an ACK message to the tracker to check if the tracker is alive.
+    - Receives an ACK response from the tracker.
+    - Requests a list of nodes that have the file `sample.pdf`.
+
+2. Tracker Response:
+    - The tracker responds with a list of nodes that have the file, i.e., Node 1 and Node 2.
+
+3. Node 3 Interaction:
+    - Sends ping requests to Node 1 and Node 2.
+    - Waits for pong responses and measures the latency to each sender node.
+    - Selects the few nodes(Upto MAX_SPLITTNES_RATE) with the lowest latency for downloading the file.
+
+4. File Transfer:
+    - Node 3 sends a file request to the selected node (Node 1 and Node 2).
+    - Node 1 and Node 2 will send half size of file.
+    - Node 3 will sort both chunks and assemble`sample.pdf` file and store.
+
+5. Post-Download Update:
+    - After successfully downloading the file, Node 3 notifies the tracker that it now also has `sample.pdf`.
+
+
+Throughout the entire process, nodes periodically send heartbeat messages to the tracker to indicate they are active. 
+The tracker receives these messages periodically, and if it detects that a node has stopped sending heartbeats, 
+it will remove that node's information from its records.
