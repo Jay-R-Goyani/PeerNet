@@ -47,6 +47,18 @@ class Node {
     static void init(int id, int rcv_port, int send_port) {
         node_id = id; 
         send_socket = set_socket(send_port); 
+
+        // Create base directories
+        if (!create_directory_recursive(Config::Directory::LOGS_DIR)) {
+            log(node_id, "Warning: Failed to create logs directory");
+        }
+        if (!create_directory_recursive(Config::Directory::NODE_FILES_DIR)) {
+            log(node_id, "Warning: Failed to create node_files directory");
+        }
+        if (!create_directory_recursive(Config::Directory::TRACKER_DB_DIR)) {
+            log(node_id, "Warning: Failed to create tracker_db directory");
+        }
+
         files = fetch_owned_files(); // Fetch the list of files owned by this node
     }
     
@@ -54,6 +66,11 @@ class Node {
     static std::unordered_set<std::string> fetch_owned_files() {
         std::unordered_set<std::string> files; // Set to store file names
         std::string node_files_dir = std::string(Config::Directory::NODE_FILES_DIR) + "node" + std::to_string(node_id);
+
+        if (!create_directory_recursive(node_files_dir)) {
+            log(node_id, "Warning: Could not create node files directory");
+            return files;
+        }
     
         struct stat st;
         if (stat(node_files_dir.c_str(), &st) != 0) {
@@ -94,6 +111,37 @@ class Node {
     
         closedir(dir); 
         return files; 
+    }
+
+    static bool create_directory_recursive(const std::string& path) {
+        static std::mutex dir_mutex;
+        std::lock_guard<std::mutex> lock(dir_mutex);
+        
+        size_t pos = 0;
+        std::string dir;
+        int mdret;
+        
+        if (path[path.size()-1] != '/') {
+            dir = path + "/";
+        }
+        
+        while ((pos = dir.find_first_of('/', pos)) != std::string::npos) {
+            std::string subdir = dir.substr(0, pos++);
+            if (subdir.empty()) continue; // Skip leading /
+            
+            struct stat st;
+            if (stat(subdir.c_str(), &st) == -1) {
+                mdret = mkdir(subdir.c_str(), 0755);
+                if (mdret != 0 && errno != EEXIST) {
+                    log(node_id, "Error creating directory " + subdir + ": " + strerror(errno));
+                    return false;
+                }
+            } else if (!S_ISDIR(st.st_mode)) {
+                log(node_id, "Error: " + subdir + " exists but is not a directory");
+                return false;
+            }
+        }
+        return true;
     }
 
 
@@ -771,6 +819,13 @@ class Node {
         if (chunks.empty()) {
             log(node_id, "Error: No chunks provided for reassembly");
             return;
+        }
+
+        std::string dir_path = std::string(Config::Directory::NODE_FILES_DIR) + 
+                       "node" + std::to_string(node_id);
+        if (!create_directory_recursive(dir_path)) {
+            log(node_id, "Error creating directory: " + dir_path);
+            return; 
         }
 
         // Open the output file in binary write mode, truncating any existing content
