@@ -34,14 +34,25 @@
 #include "messages/chunk_sharing.h"
 
 
-static std::mutex download_mutex; // Mutex for synchronizing access to downloaded_files
-
 class Node {
     public:
     static int node_id;                                                                   // Node ID
     static int send_socket;                                                               // Socket for sending messages
     static std::unordered_set<std::string> files;                                         // Set of files owned by this node
     static std::unordered_map<std::string, std::vector<ChunkSharing>> downloaded_files;   // Map of downloaded files and their chunks
+
+    static pthread_mutex_t mutex_lock; // Mutex for thread safety
+    static pthread_mutex_t log_mutex; // Mutex for thread safety
+
+    Node() {
+        pthread_mutex_init(&mutex_lock, nullptr);
+        pthread_mutex_init(&log_mutex, nullptr);
+    }
+
+    ~Node() {
+        pthread_mutex_destroy(&mutex_lock);
+        pthread_mutex_destroy(&log_mutex);
+    }
 
     // Initialize the node with the given ID, receive port, and send port
     static void init(int id, int rcv_port, int send_port) {
@@ -50,16 +61,22 @@ class Node {
 
         // Create base directories
         if (!create_directory_recursive(Config::Directory::LOGS_DIR)) {
-            log(node_id, "Warning: Failed to create logs directory");
+            log_thread_safe(node_id, "Warning: Failed to create logs directory");
         }
         if (!create_directory_recursive(Config::Directory::NODE_FILES_DIR)) {
-            log(node_id, "Warning: Failed to create node_files directory");
+            log_thread_safe(node_id, "Warning: Failed to create node_files directory");
         }
         if (!create_directory_recursive(Config::Directory::TRACKER_DB_DIR)) {
-            log(node_id, "Warning: Failed to create tracker_db directory");
+            log_thread_safe(node_id, "Warning: Failed to create tracker_db directory");
         }
 
         files = fetch_owned_files(); // Fetch the list of files owned by this node
+    }
+
+    static void log_thread_safe(int node_id, const std::string& content) {
+        pthread_mutex_lock(&log_mutex);
+        log(node_id, content);
+        pthread_mutex_unlock(&log_mutex);
     }
     
     // Fetch the list of files owned by this node
@@ -68,7 +85,7 @@ class Node {
         std::string node_files_dir = std::string(Config::Directory::NODE_FILES_DIR) + "node" + std::to_string(node_id);
 
         if (!create_directory_recursive(node_files_dir)) {
-            log(node_id, "Warning: Could not create node files directory");
+            log_thread_safe(node_id, "Warning: Could not create node files directory");
             return files;
         }
     
@@ -133,11 +150,11 @@ class Node {
             if (stat(subdir.c_str(), &st) == -1) {
                 mdret = mkdir(subdir.c_str(), 0755);
                 if (mdret != 0 && errno != EEXIST) {
-                    log(node_id, "Error creating directory " + subdir + ": " + strerror(errno));
+                    log_thread_safe(node_id, "Error creating directory " + subdir + ": " + strerror(errno));
                     return false;
                 }
             } else if (!S_ISDIR(st.st_mode)) {
-                log(node_id, "Error: " + subdir + " exists but is not a directory");
+                log_thread_safe(node_id, "Error: " + subdir + " exists but is not a directory");
                 return false;
             }
         }
@@ -150,12 +167,12 @@ class Node {
     // Function to send a data segment to a specified address using a UDP socket
     static bool send_segment(int send_socket, const std::vector<char>& data, const std::pair<std::string, int>& addr) {
         if (send_socket < 0) {
-            log(node_id, "Error: Invalid socket in send_segment.");
+            log_thread_safe(node_id, "Error: Invalid socket in send_segment.");
             return false; 
         }
     
         if (data.empty()) {
-            log(node_id, "Error: Empty data vector in send_segment.");
+            log_thread_safe(node_id, "Error: Empty data vector in send_segment.");
             return false; 
         }
     
@@ -163,7 +180,7 @@ class Node {
         socklen_t addr_len = sizeof(sock_addr);
         if (getsockname(send_socket, (struct sockaddr*)&sock_addr, &addr_len) == -1) {
             perror("getsockname failed"); 
-            log(node_id, "Error: Failed to get socket name.");
+            log_thread_safe(node_id, "Error: Failed to get socket name.");
             return false; 
         }
     
@@ -180,7 +197,7 @@ class Node {
                                   (struct sockaddr*)&client_addr, sizeof(client_addr));
         if (sent_len < 0) {
             perror("sendto failed"); 
-            log(node_id, "Error: Failed to send data to " + addr.first + ":" + std::to_string(addr.second));
+            log_thread_safe(node_id, "Error: Failed to send data to " + addr.first + ":" + std::to_string(addr.second));
             return false; 
         }
     
@@ -217,16 +234,16 @@ class Node {
             std::string ack(buffer, buffer + recv_len);
 
             if (ack == "ACK") {
-                log(node_id, "ACK received from Tracker"); 
+                log_thread_safe(node_id, "ACK received from Tracker"); 
             } else {
-                log(node_id, "Unexpected message instead of ACK: " + ack); 
+                log_thread_safe(node_id, "Unexpected message instead of ACK: " + ack); 
             }
         } else {
-            log(node_id, "ACK not received within timeout. Tracker might be down.");
+            log_thread_safe(node_id, "ACK not received within timeout. Tracker might be down.");
             return;
         }
 
-        log(node_id, "Entered Torrent.");
+        log_thread_safe(node_id, "Entered Torrent.");
     }
 
     // Function to gracefully exit the torrent system
@@ -236,7 +253,7 @@ class Node {
 
         send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});
 
-        log(node_id, "You exited the torrent!");
+        log_thread_safe(node_id, "You exited the torrent!");
     }
 
     // Thread function to periodically inform the tracker that the node is still active
@@ -246,7 +263,7 @@ class Node {
 
         while (true) {
             std::string log_contain = "I informed the tracker that I'm still alive in the torrent!";
-            log(node_id, log_contain);
+            log_thread_safe(node_id, log_contain);
 
             // Create a heartbeat message to notify the tracker
             Node2Tracker msg(node_id, Config::TrackerRequestsMode::HEARTBEAT, "");
@@ -301,13 +318,13 @@ class Node {
         // Check if the file exists and retrieve its metadata using stat
         struct stat file_stat;
         if (stat(file_path.c_str(), &file_stat) != 0) {
-            log(node_id, "File not found: " + filename + (errno != ENOENT ? " (" + std::string(strerror(errno)) + ")" : ""));
+            log_thread_safe(node_id, "File not found: " + filename + (errno != ENOENT ? " (" + std::string(strerror(errno)) + ")" : ""));
             return;
         }
     
         // Verify that the path corresponds to a regular file
         if (!S_ISREG(file_stat.st_mode)) {
-            log(node_id, "Path is not a regular file: " + filename);
+            log_thread_safe(node_id, "Path is not a regular file: " + filename);
             return;
         }
     
@@ -376,7 +393,7 @@ class Node {
     // Sends a chunk of a file to a destination node
     static void send_chunk(const std::string& filename, std::pair<int, int> range, int dest_node_id, int dest_port, const std::string& dest_ip) {
         if (range.first < 0 || range.second < 0 || range.first > range.second) {
-            log(node_id, "Error: Invalid range specified for file " + filename);
+            log_thread_safe(node_id, "Error: Invalid range specified for file " + filename);
             return;
         }
     
@@ -388,19 +405,19 @@ class Node {
     
         struct stat file_stat;
         if (stat(file_path.c_str(), &file_stat) != 0 || !S_ISREG(file_stat.st_mode)) {
-            log(node_id, "Error: File not found or inaccessible: " + filename + 
+            log_thread_safe(node_id, "Error: File not found or inaccessible: " + filename + 
                 (errno != ENOENT ? " (" + std::string(strerror(errno)) + ")" : ""));
             return;
         }
     
         // Get file size for logging
         off_t file_size = file_stat.st_size;
-        log(node_id, "Starting to send file: " + filename + " (Size: " + std::to_string(file_size) + " bytes)");
+        log_thread_safe(node_id, "Starting to send file: " + filename + " (Size: " + std::to_string(file_size) + " bytes)");
     
         // Split the file into chunks based on the specified range
         std::vector<std::vector<char>> chunk_pieces = split_file_to_chunks(file_path, range);
         if (chunk_pieces.empty()) {
-            log(node_id, "Error: Failed to split file into chunks for " + filename);
+            log_thread_safe(node_id, "Error: Failed to split file into chunks for " + filename);
             return;
         }
     
@@ -412,7 +429,7 @@ class Node {
             temp_sock = set_socket(temp_port); 
         }
         if (temp_sock < 0) {
-            log(node_id, "Error: Failed to create temporary socket.");
+            log_thread_safe(node_id, "Error: Failed to create temporary socket.");
             return;
         }
     
@@ -421,7 +438,7 @@ class Node {
         // Send each chunk to the destination node
         for (size_t idx = 0; idx < chunk_pieces.size(); ++idx) {
             if (chunk_pieces[idx].size() > Config::Constants::CHUNK_PIECES_SIZE) {
-                log(node_id, "Error: Chunk " + std::to_string(idx) + " exceeds maximum size for file " + filename);
+                log_thread_safe(node_id, "Error: Chunk " + std::to_string(idx) + " exceeds maximum size for file " + filename);
                 return;
             }
     
@@ -430,34 +447,34 @@ class Node {
     
             // Send the chunk to the destination node
             if (!send_segment(temp_sock, msg.encode(), {dest_ip, dest_port})) {
-                log(node_id, "Error: Failed to send chunk " + std::to_string(idx) + " for file " + filename);
+                log_thread_safe(node_id, "Error: Failed to send chunk " + std::to_string(idx) + " for file " + filename);
                 return;
             }
     
             total_bytes_sent += chunk_pieces[idx].size();
-            // log(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + " (" + std::to_string(chunk_pieces[idx].size()) + " bytes) for file " + filename);
+            // log_thread_safe(node_id, "Sent chunk " + std::to_string(idx) + "/" + std::to_string(chunk_pieces.size()) + " (" + std::to_string(chunk_pieces[idx].size()) + " bytes) for file " + filename);
         }
     
         // Send a termination signal to indicate the end of transmission
         ChunkSharing msg(node_id, dest_node_id, filename, range, -1, {});
         if (!send_segment(temp_sock, msg.encode(), {dest_ip, dest_port})) {
-            log(node_id, "Error: Failed to send termination signal for file " + filename);
+            log_thread_safe(node_id, "Error: Failed to send termination signal for file " + filename);
             return;
         }
     
         auto end_time = std::chrono::high_resolution_clock::now();
         auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
         
-        log(node_id, "Finished sending chunks for file: " + filename + " to Node " + std::to_string(dest_node_id));
-        log(node_id, "Total bytes sent: " + std::to_string(total_bytes_sent) + 
+        log_thread_safe(node_id, "Finished sending chunks for file: " + filename + " to Node " + std::to_string(dest_node_id));
+        log_thread_safe(node_id, "Total bytes sent: " + std::to_string(total_bytes_sent) + 
             " in " + std::to_string(duration.count()) + " ms");
-        log(node_id, "Average speed: " + 
+        log_thread_safe(node_id, "Average speed: " + 
             std::to_string((total_bytes_sent * 1000) / (duration.count() * 1024)) + " KB/s");
     
         // Notify the tracker about the file update
         Node2Tracker to_tracker_msg(node_id, Config::TrackerRequestsMode::UPDATE, filename);
         if (!send_segment(temp_sock, to_tracker_msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT})) {
-            log(node_id, "Error: Failed to notify tracker about file " + filename);
+            log_thread_safe(node_id, "Error: Failed to notify tracker about file " + filename);
         }
     }
 
@@ -493,7 +510,7 @@ class Node {
             int size = result.size;
             if (size == -1) {
                 // If size is -1, it indicates a request for the file size
-                log(node_id, "Received a request for size of " + filename);
+                log_thread_safe(node_id, "Received a request for size of " + filename);
                 send_file_size(result, addr); // Respond with the file size
             }
         } 
@@ -539,16 +556,18 @@ class Node {
 
     // Sets the node to send mode for the specified file
     static void set_send_mode(const std::string& filename) {
+        pthread_mutex_lock(&mutex_lock);
         if (files.find(filename) == files.end()) {
-            log(node_id, "You don't have " + filename); 
+            log_thread_safe(node_id, "You don't have " + filename); 
             return;
         }
+        pthread_mutex_unlock(&mutex_lock);
 
         // Notify the tracker that this node owns the file
         Node2Tracker msg(node_id, Config::TrackerRequestsMode::OWN, filename);
         send_segment(send_socket, msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT});  
 
-        log(node_id, "FILE ENTRY REGISTERED! You are waiting for other nodes' requests!"); 
+        log_thread_safe(node_id, "FILE ENTRY REGISTERED! You are waiting for other nodes' requests!"); 
 
         // Start a listener thread to handle incoming requests
         pthread_t listener_thread;
@@ -568,15 +587,15 @@ class Node {
 
         struct stat buffer;
         if (stat(file_path.c_str(), &buffer) == 0) {
-            log(node_id, "You already have this file!");
+            log_thread_safe(node_id, "You already have this file!");
             return nullptr;
         } else {
-            log(node_id, "Let's search " + filename + " in the torrent!");
+            log_thread_safe(node_id, "Let's search " + filename + " in the torrent!");
 
             std::vector<std::pair<FileOwner, int>> file_owners = search_torrent(filename);
 
             if (file_owners.empty()) {
-                log(node_id, "No one has " + filename);
+                log_thread_safe(node_id, "No one has " + filename);
                 return nullptr;
             }
 
@@ -623,7 +642,7 @@ class Node {
         int temp_port = generate_random_port();
         int temp_sock = set_socket(temp_port);
         if (temp_sock < 0) {
-            log(node_id, "Error creating socket for latency measurement");
+            log_thread_safe(node_id, "Error creating socket for latency measurement");
             return -1;
         }
 
@@ -636,7 +655,7 @@ class Node {
         const std::string ping_msg = "PING";
         auto start = std::chrono::high_resolution_clock::now();
 
-        log(node_id, "Sending PING to " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
+        log_thread_safe(node_id, "Sending PING to " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
         // Send ping
         if (!send_segment(temp_sock, std::vector<char>(ping_msg.begin(), ping_msg.end()), {ip, port})) {
             free_socket(temp_sock);
@@ -650,7 +669,7 @@ class Node {
         ssize_t recv_len = recvfrom(temp_sock, buffer, sizeof(buffer), 0,
                                    (struct sockaddr*)&from_addr, &from_len);
 
-        log(node_id, "Received PONG from " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
+        log_thread_safe(node_id, "Received PONG from " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
 
         free_socket(temp_sock);
 
@@ -673,7 +692,7 @@ class Node {
             long latency = measure_latency(peer.first.addr.first, peer.first.addr.second, peer.first.node_id);
             if (latency >= 0) {  // Only consider responsive peers
                 peers_with_latency.emplace_back(peer.first, latency);
-                log(node_id, "Latency to node " + std::to_string(peer.first.node_id) + 
+                log_thread_safe(node_id, "Latency to node " + std::to_string(peer.first.node_id) + 
                     ": " + std::to_string(latency) + "ms");
             }
         }
@@ -706,7 +725,7 @@ class Node {
         }
     
         if (owners.empty()) {
-            log(node_id, "No one has " + filename);
+            log_thread_safe(node_id, "No one has " + filename);
             return;
         }
         
@@ -714,7 +733,7 @@ class Node {
         std::vector<FileOwner> to_be_used_owners = select_best_peers(owners, Config::Constants::MAX_SPLITTNES_RATE);
     
         if (to_be_used_owners.empty()) {
-            log(node_id, "No responsive peers found for " + filename);
+            log_thread_safe(node_id, "No responsive peers found for " + filename);
             return;
         }
     
@@ -722,11 +741,11 @@ class Node {
         for (const auto& owner : to_be_used_owners) {
             log_content += std::to_string(owner.node_id) + " "; 
         }
-        log(node_id, log_content);
+        log_thread_safe(node_id, log_content);
     
         // Request the file size from the first peer (to determine the file size for splitting)
         int file_size = ask_file_size(filename, to_be_used_owners[0]);
-        log(node_id, "File " + filename + " size: " + std::to_string(file_size) + " bytes");
+        log_thread_safe(node_id, "File " + filename + " size: " + std::to_string(file_size) + " bytes");
     
         // Split the file equally among the selected peers
         int step = file_size / to_be_used_owners.size(); 
@@ -741,8 +760,9 @@ class Node {
         // Lock mutex to ensure thread-safety when modifying the downloaded_files map
         static std::mutex downloaded_files_mutex;
         {
-            std::lock_guard<std::mutex> lock(downloaded_files_mutex);
-            downloaded_files[filename] = {};  
+            pthread_mutex_lock(&mutex_lock);
+            downloaded_files[filename] = {};
+            pthread_mutex_unlock(&mutex_lock);  
         }
     
         // Create threads to download chunks concurrently
@@ -753,7 +773,7 @@ class Node {
             
             // Create a new thread to download the chunk
             if (pthread_create(&threads[i], nullptr, receive_chunk, args) != 0) {
-                log(node_id, "Error: Failed to create thread for chunk " + std::to_string(i));
+                log_thread_safe(node_id, "Error: Failed to create thread for chunk " + std::to_string(i));
                 delete args; 
             }
         }
@@ -766,16 +786,16 @@ class Node {
         auto download_end_time = std::chrono::high_resolution_clock::now();
         auto download_duration = std::chrono::duration_cast<std::chrono::milliseconds>(download_end_time - download_start_time);
         
-        log(node_id, "All chunks of " + filename + " downloaded in " + 
+        log_thread_safe(node_id, "All chunks of " + filename + " downloaded in " + 
             std::to_string(download_duration.count()) + " ms");
-        log(node_id, "Average download speed: " + 
+        log_thread_safe(node_id, "Average download speed: " + 
             std::to_string((file_size * 1000) / (download_duration.count() * 1024)) + " KB/s");
     
-        log(node_id, "Sorting chunks now...");
+        log_thread_safe(node_id, "Sorting chunks now...");
     
         // Sort the downloaded chunks based on their ranges
         std::vector<ChunkSharing> sorted_chunks = sort_downloaded_chunks(filename);
-        log(node_id, "All chunks sorted. Reassembling file...");
+        log_thread_safe(node_id, "All chunks sorted. Reassembling file...");
     
         std::string file_path = std::string(Config::Directory::NODE_FILES_DIR) + 
                                 "node" + std::to_string(node_id) + "/" + filename;
@@ -785,7 +805,7 @@ class Node {
         struct stat st;
         if (stat(dir_path.c_str(), &st) != 0) {
             if (mkdir(dir_path.c_str(), 0755) != 0) {
-                log(node_id, "Error creating directory: " + dir_path + " (" + strerror(errno) + ")");
+                log_thread_safe(node_id, "Error creating directory: " + dir_path + " (" + strerror(errno) + ")");
                 return; 
             }
         }
@@ -798,16 +818,15 @@ class Node {
         auto reassemble_end_time = std::chrono::high_resolution_clock::now();
         auto reassemble_duration = std::chrono::duration_cast<std::chrono::milliseconds>(reassemble_end_time - reassemble_start_time);
         
-        log(node_id, filename + " successfully reassembled in " + 
+        log_thread_safe(node_id, filename + " successfully reassembled in " + 
             std::to_string(reassemble_duration.count()) + " ms");
-        log(node_id, "Total download and reassembly time: " + 
+        log_thread_safe(node_id, "Total download and reassembly time: " + 
             std::to_string((download_duration + reassemble_duration).count()) + " ms");
     
-        static std::mutex files_mutex;
-        {
-            std::lock_guard<std::mutex> lock(files_mutex);
-            files.insert(filename); 
-        }
+
+        pthread_mutex_lock(&mutex_lock);
+        files.insert(filename); 
+        pthread_mutex_unlock(&mutex_lock);
     
         // Inform the tracker that this node now has the file
         set_send_mode(filename);
@@ -816,27 +835,27 @@ class Node {
     // Reassemble the full file from its received chunks and write to disk
     static void reassemble_file(std::vector<ChunkSharing>& chunks, const std::string& file_path) {
         if (chunks.empty()) {
-            log(node_id, "Error: No chunks provided for reassembly");
+            log_thread_safe(node_id, "Error: No chunks provided for reassembly");
             return;
         }
 
         std::string dir_path = std::string(Config::Directory::NODE_FILES_DIR) + 
                        "node" + std::to_string(node_id);
         if (!create_directory_recursive(dir_path)) {
-            log(node_id, "Error creating directory: " + dir_path);
+            log_thread_safe(node_id, "Error creating directory: " + dir_path);
             return; 
         }
 
         // Open the output file in binary write mode, truncating any existing content
         std::ofstream file(file_path, std::ios::binary | std::ios::out | std::ios::trunc);
         if (!file) {
-            log(node_id, "Failed to open file: " + file_path + " while assembling");
+            log_thread_safe(node_id, "Failed to open file: " + file_path + " while assembling");
             return;
         }
 
         for (const auto& chunk : chunks) {
             if (!file.write(chunk.chunk.data(), chunk.chunk.size())) {
-                log(node_id, "Error: Failed to write chunk to file " + file_path);
+                log_thread_safe(node_id, "Error: Failed to write chunk to file " + file_path);
                 return;
             }
         }
@@ -845,13 +864,13 @@ class Node {
 
         // Ensure all data is flushed to disk
         if (!file.flush()) {
-            log(node_id, "Error: Failed to flush file " + file_path);
+            log_thread_safe(node_id, "Error: Failed to flush file " + file_path);
             return;
         }
 
         file.close();
 
-        log(node_id, "File successfully reassembled: " + file_path);
+        log_thread_safe(node_id, "File successfully reassembled: " + file_path);
     }
 
     // Thread function to request and receive a file chunk from another node
@@ -869,19 +888,19 @@ class Node {
         int temp_port = generate_random_port();
         int temp_sock = set_socket(temp_port);
         if (temp_sock < 0) {
-            log(node_id, "Error: Failed to create temporary socket");
+            log_thread_safe(node_id, "Error: Failed to create temporary socket");
             return nullptr;
         }
 
         // Send a request message for the chunk (idx = -1 indicates request)
         ChunkSharing msg(node_id, dest_node_id, filename, range, -1);
         if (!send_segment(temp_sock, msg.encode(), {file_owner.addr.first, file_owner.addr.second})) {
-            log(node_id, "Error: Failed to send request for chunk of " + filename + " to node " + std::to_string(dest_node_id));
+            log_thread_safe(node_id, "Error: Failed to send request for chunk of " + filename + " to node " + std::to_string(dest_node_id));
             free_socket(temp_sock);
             return nullptr;
         }
 
-        log(node_id, "I sent a request for a chunk of " + filename + " for node " + std::to_string(dest_node_id));
+        log_thread_safe(node_id, "I sent a request for a chunk of " + filename + " for node " + std::to_string(dest_node_id));
 
         int retry_count = 0;
         const int MAX_RETRIES = 10;
@@ -909,29 +928,31 @@ class Node {
             }
 
             // Store the received chunk in a thread-safe manner
-            {
-                std::lock_guard<std::mutex> lock(download_mutex);
-                downloaded_files[filename].push_back(result);
-            }
+            pthread_mutex_lock(&mutex_lock);
+            downloaded_files[filename].push_back(result);
+            pthread_mutex_unlock(&mutex_lock);
 
             retry_count = 0; 
         }
 
         // If retries exceeded, log an error and exit
-        log(node_id, "Error: Maximum retries reached for receiving chunks of " + filename);
+        log_thread_safe(node_id, "Error: Maximum retries reached for receiving chunks of " + filename);
         free_socket(temp_sock);
         return nullptr;
     }
 
     // Sorts and returns the downloaded chunks of a file based on range and chunk index
     static std::vector<ChunkSharing> sort_downloaded_chunks(const std::string& filename) {
+
+        pthread_mutex_lock(&mutex_lock);
         // Check if the file has any downloaded chunks
         if (downloaded_files.find(filename) == downloaded_files.end()) {
-            log(node_id, "No downloaded chunks found for " + filename);
+            log_thread_safe(node_id, "No downloaded chunks found for " + filename);
             return {};
         }
 
         auto& chunks = downloaded_files[filename];
+        pthread_mutex_unlock(&mutex_lock);
 
         // Sort chunks by start of range, then by chunk index
         std::sort(chunks.begin(), chunks.end(),
@@ -959,5 +980,6 @@ class Node {
     }
 
 };
-
+pthread_mutex_t Node::mutex_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t Node::log_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif

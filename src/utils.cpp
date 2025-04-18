@@ -50,47 +50,6 @@ int set_socket(int port) {
     return sock;
 }
 
-    /**
-     * @brief Sets up a TCP listening socket
-     * @param port Port to listen on
-     * @return Socket descriptor or -1 on error
-     */
-    static int set_tcp_socket(int port) {
-        int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-        if (sockfd < 0) {
-            perror("socket creation failed");
-            return -1;
-        }
-
-        int opt = 1;
-        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-            perror("setsockopt failed");
-            close(sockfd);
-            return -1;
-        }
-
-        struct sockaddr_in serv_addr;
-        memset(&serv_addr, 0, sizeof(serv_addr));
-        serv_addr.sin_family = AF_INET;
-        serv_addr.sin_addr.s_addr = INADDR_ANY;
-        serv_addr.sin_port = htons(port);
-
-        if (bind(sockfd, (struct sockaddr*)&serv_addr, sizeof(serv_addr)) < 0) {
-            perror("bind failed");
-            close(sockfd);
-            return -1;
-        }
-
-        // if (listen(sockfd, Config::Constants::MAX_PENDING_CONNECTIONS) < 0) {
-        //     perror("listen failed");
-        //     close(sockfd);
-        //     return -1;
-        // }
-
-        used_ports.insert(port);
-        return sockfd;
-    }
-
 // Function to free (close) a socket
 void free_socket(int sock) {
     if (sock >= 0) {

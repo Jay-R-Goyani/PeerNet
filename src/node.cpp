@@ -16,7 +16,7 @@ void run(int node_id) {
     node.init(node_id, generate_random_port(), generate_random_port());
 
     std::string log_content = "********** Node program started just right now! **********";
-    log(node_id, log_content);
+    Node::log_thread_safe(node_id, log_content);
 
     // Register the node in the torrent system by informing the tracker
     node.enter_torrent();
