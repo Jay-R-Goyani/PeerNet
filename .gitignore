@@ -1,2 +1,5 @@
 src/tracker
 src/node
+src/tracker_db/
+src/node_files/
+src/logs/
