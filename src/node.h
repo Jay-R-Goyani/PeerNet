@@ -552,7 +552,18 @@ class Node {
             int bytes_received = recvfrom(send_socket, buffer, sizeof(buffer), 0, (struct sockaddr*)&addr, &addr_len);
 
             if (bytes_received > 0) {
-                handle_requests(buffer, bytes_received, addr); 
+                pthread_t request_thread;
+                auto* args = new std::tuple<char*, int, sockaddr_in>(buffer, bytes_received, addr);
+                pthread_create(&request_thread, nullptr, [](void* arg) -> void* {
+                    auto* params = static_cast<std::tuple<char*, int, sockaddr_in>*>(arg);
+                    char* buffer = std::get<0>(*params);
+                    int bytes_received = std::get<1>(*params);
+                    sockaddr_in addr = std::get<2>(*params);
+                    handle_requests(buffer, bytes_received, addr);
+                    delete params;
+                    return nullptr;
+                }, args);
+                pthread_detach(request_thread);
             }
         }
         return nullptr; 
