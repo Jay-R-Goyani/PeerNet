@@ -27,7 +27,7 @@ struct FileOwner {
 class Tracker2Node : public Message {
 public:
     int dest_node_id;                                        // ID of destination node
-    std::vector<std::pair<FileOwner, int>> search_result;   // List of file owners and their frequency
+    std::vector<std::pair<FileOwner, int>> search_result;   // List of file owners(IP and PORT) and their frequency
     std::string filename;                                    // Name of requested file
 
     /**

@@ -30,7 +30,6 @@ namespace Config {
         static constexpr int CHUNK_PIECES_SIZE = 9216 - 2000;  // Size of individual chunk pieces
 
         static constexpr int MAX_SPLITTNES_RATE = 10;    // Maximum split rate for file chunks
-        static constexpr int WORKER_THREADS = 50;        // Number of worker threads in thread pool
         
         static constexpr int NODE_TIME_INTERVAL = 30;    // Node update interval
         static constexpr int TRACKER_TIME_INTERVAL = 45; // Tracker update interval

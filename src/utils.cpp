@@ -44,8 +44,6 @@ int set_socket(int port) {
         return -1;
     }
 
-    // listen(sock, Config::Constants::MAX_PENDING_CONNECTIONS);
-
     used_ports.insert(port);
     return sock;
 }

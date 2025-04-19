@@ -48,9 +48,9 @@ class Tracker {
 private:
     // Static members
     static int tracker_socket;
-    static std::unordered_map<std::string, std::vector<FileOwner>> file_owners_list;
-    static std::unordered_map<int, int> send_freq_list;
-    static std::unordered_map<std::pair<int, std::pair<std::string, int>>, bool> has_informed_tracker;
+    static std::unordered_map<std::string, std::vector<FileOwner>> file_owners_list; // `filename` -> list of ownersList(nodeID, IP and PORT)
+    static std::unordered_map<int, int> send_freq_list;                              // nodeid->frequency
+    static std::unordered_map<std::pair<int, std::pair<std::string, int>>, bool> has_informed_tracker; // nodeId, (IP, PORT) -> has informed tracker(bool)
     
     // Concurrency control
     static pthread_mutex_t data_mutex;  // Protects file_owners_list, send_freq_list, has_informed_tracker
