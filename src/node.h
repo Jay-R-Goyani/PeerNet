@@ -50,6 +50,7 @@ class Node {
     }
 
     ~Node() {
+        free_socket(send_socket); // Free the socket
         pthread_mutex_destroy(&mutex_lock);
         pthread_mutex_destroy(&log_mutex);
     }
@@ -300,6 +301,7 @@ class Node {
                 // Decode the received data into a Tracker2Node object
                 Tracker2Node result = Tracker2Node::decode(std::vector<char>(buffer, buffer + bytes_received));
 
+                free_socket(temp_sock); // Free the temporary socket
                 return result.search_result;
             }
         }
@@ -476,6 +478,8 @@ class Node {
         if (!send_segment(temp_sock, to_tracker_msg.encode(), {Config::Constants::TRACKER_IP, Config::Constants::TRACKER_PORT})) {
             log_thread_safe(node_id, "Error: Failed to notify tracker about file " + filename);
         }
+
+        free_socket(temp_sock); // Free the temporary socket
     }
 
     // Thread function to handle ping requests (run in listen thread)
@@ -483,9 +487,9 @@ class Node {
         const std::string pong_msg = "PONG";
         std::string ip_str = inet_ntoa(addr.sin_addr);
         int port = ntohs(addr.sin_port);    
-        std::cout << "Received PING " << ip_str << ":" << port << std::endl;
+        log_thread_safe(node_id, "Received PING from " + ip_str + ":" + std::to_string(port));
         send_segment(send_socket, std::vector<char>(pong_msg.begin(), pong_msg.end()), {ip_str, port});  
-        std::cout << "Sending PONG " << ip_str << ":" << port << std::endl;
+        log_thread_safe(node_id, "Sending PONG to " + ip_str + ":" + std::to_string(port));
     }
 
     // Handles incoming requests from other nodes
@@ -638,7 +642,7 @@ class Node {
     }
 
     // Measures latency to a peer using UDP ping-pong
-    static long measure_latency(const std::string& ip, int port, int node_id) {
+    static long measure_latency(const std::string& ip, int port, int rec_node_id) {
         int temp_port = generate_random_port();
         int temp_sock = set_socket(temp_port);
         if (temp_sock < 0) {
@@ -655,7 +659,7 @@ class Node {
         const std::string ping_msg = "PING";
         auto start = std::chrono::high_resolution_clock::now();
 
-        log_thread_safe(node_id, "Sending PING to " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
+        log_thread_safe(node_id, "Sending PING to " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(rec_node_id));
         // Send ping
         if (!send_segment(temp_sock, std::vector<char>(ping_msg.begin(), ping_msg.end()), {ip, port})) {
             free_socket(temp_sock);
@@ -669,7 +673,7 @@ class Node {
         ssize_t recv_len = recvfrom(temp_sock, buffer, sizeof(buffer), 0,
                                    (struct sockaddr*)&from_addr, &from_len);
 
-        log_thread_safe(node_id, "Received PONG from " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(node_id));
+        log_thread_safe(node_id, "Received PONG from " + ip + ":" + std::to_string(port) + " node_id: " + std::to_string(rec_node_id));
 
         free_socket(temp_sock);
 
@@ -679,7 +683,7 @@ class Node {
 
         auto end = std::chrono::high_resolution_clock::now();
         long latency = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();     
-        std::cout << "Latency to " << ip << ":" << port << " is " << latency << "ms" << std::endl;
+        log_thread_safe(node_id, "Latency to " + ip + ":" + std::to_string(port) + " is " + std::to_string(latency) + "ms");
         return latency;
     }
 
@@ -970,11 +974,12 @@ class Node {
         std::vector<std::pair<FileOwner, int>> file_owners = search_torrent(filename);
         
         if (file_owners.empty()) {
-            std::cout << "No owners found for file: " << filename << std::endl;
+            log_thread_safe(node_id, "No owners found for file: " + filename);
         } else {
-            std::cout << "Owners of file " << filename << ":" << std::endl;
+            log_thread_safe(node_id, "Owners of file " + filename + ":");
             for (const auto& owner : file_owners) {
-                std::cout << "Node " << owner.first.node_id << " (" << owner.first.addr.first << ":" << owner.first.addr.second << ")" << std::endl;
+                log_thread_safe(node_id, "Node " + std::to_string(owner.first.node_id) + 
+                    " (" + owner.first.addr.first + ":" + std::to_string(owner.first.addr.second) + ")");
             }
         }
     }
